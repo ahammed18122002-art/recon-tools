@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """MH Security Tool Installer — Kali/Debian Linux, Tkinter GUI.
 Installs and verifies DNSRecon, Subfinder, ProjectDiscovery httpx, Nmap,
-Katana, Arjun, dnsx, naabu, and Nuclei. Uses official Go downloads with SHA-256 verification.
+Katana, Arjun, Photon, dnsx, naabu, and Nuclei. Uses official Go downloads with SHA-256 verification.
 """
 from __future__ import annotations
 
@@ -27,6 +27,9 @@ BASE_DIR = Path.home() / ".local" / "share" / "mh-tool-installer"
 LOCAL_BIN = Path.home() / ".local" / "bin"
 GO_SDK_DIR = BASE_DIR / "go-sdk"
 REPORT_PATH = BASE_DIR / "install_report.txt"
+PHOTON_REPO = "https://github.com/s0md3v/Photon.git"
+PHOTON_DIR = BASE_DIR / "photon"
+PHOTON_VENV = BASE_DIR / "photon-venv"
 
 # Individual APT package rows allow the GUI to distinguish packages that were
 # already present from packages added by this installer.
@@ -60,6 +63,7 @@ CHECKS = {
     "Nmap": ("nmap", ["nmap", "--version"]),
     "Katana": ("katana", ["katana", "-version"]),
     "Arjun": ("arjun", ["arjun", "--help"]),
+    "Photon": ("photon", ["photon", "--help"]),
     "dnsx": ("dnsx", ["dnsx", "-version"]),
     "naabu": ("naabu", ["naabu", "-version"]),
     "Nuclei": ("nuclei", ["nuclei", "-version"]),
@@ -71,6 +75,7 @@ VERSION_COMMANDS = {
     "Nmap": [["nmap", "--version"]],
     "Katana": [["katana", "-version"]],
     "Arjun": [["arjun", "--version"], ["arjun", "-V"]],
+    "Photon": [],  # Photon has no version flag; the git commit is reported instead.
     "dnsx": [["dnsx", "-version"]],
     "naabu": [["naabu", "-version"]],
     "Nuclei": [["nuclei", "-version"]],
@@ -342,6 +347,19 @@ class InstallerApp:
             if not binary or not shutil.which(binary, path=path):
                 return "Not installed"
             commands = VERSION_COMMANDS.get(name, [])
+        if name == "Photon":
+            git = shutil.which("git", path=path)
+            if git and (PHOTON_DIR / ".git").is_dir():
+                try:
+                    res = subprocess.run([git, "-C", str(PHOTON_DIR), "log", "-1", "--format=git %h (%cs)"],
+                                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                         text=True, timeout=10, env=run_env, check=False)
+                    out = (res.stdout or "").strip()
+                    if res.returncode == 0 and out:
+                        return out[:180]
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+            return "Installed (git commit unavailable)"
         for command in commands:
             try:
                 res = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -499,7 +517,7 @@ class InstallerApp:
     def _install_worker(self):
         failures: list[str] = []
         setup_states: dict[str, str] = {}
-        total = 2 + 1 + 1 + 1 + len(GO_TOOLS) + len(SYSTEM_DEPENDENCIES) + len(TOOL_ROWS) + 1
+        total = 2 + 1 + 1 + 1 + 1 + len(GO_TOOLS) + len(SYSTEM_DEPENDENCIES) + len(TOOL_ROWS) + 1
         done = 0
 
         def step(label: str):
@@ -633,6 +651,23 @@ class InstallerApp:
                 self.events.put(("status", "Arjun", "Failed", None, "pipx install or verification failed", "Unknown"))
                 failures.append("Arjun")
         step("Arjun")
+
+        # Stage 4b: Photon (OSINT crawler) from GitHub into an isolated venv.
+        self.events.put(("status", "Photon", "Running", None, "Cloning s0md3v/Photon and building an isolated virtualenv", "—"))
+        if self.verify("Photon", self.env, silent=True)[0]:
+            setup_states["Photon"] = "Already installed"
+            self.events.put(("status", "Photon", "Already installed", None, self._tool_details("Photon", True, "Existing command passed check"), self._tool_version("Photon", self.env)))
+        else:
+            installed_ok = self.install_photon()
+            ok, note = self.verify("Photon", self.env, silent=True)
+            if installed_ok and ok:
+                setup_states["Photon"] = "Installed"
+                self.events.put(("status", "Photon", "Installed", None, self._tool_details("Photon", True, note), self._tool_version("Photon", self.env)))
+            else:
+                setup_states["Photon"] = "Failed"
+                self.events.put(("status", "Photon", "Failed", None, "git clone, venv setup or verification failed: " + note, "Unknown"))
+                failures.append("Photon")
+        step("Photon")
 
         # Stage 5: Sequential ProjectDiscovery Go tools.
         for name, (binary, install_cmd, check_cmd, extra_env) in GO_TOOLS.items():
@@ -812,6 +847,39 @@ class InstallerApp:
         self.post_log(f"Installed Go {version} under {target}", "good")
         return target
 
+    def install_photon(self) -> bool:
+        """Clone Photon, create a private venv, install requirements, add a launcher in ~/.local/bin."""
+        path = self.env.get("PATH", "")
+        git = shutil.which("git", path=path)
+        python = shutil.which("python3", path=path)
+        if not git or not python:
+            self.post_log("Photon needs git and python3 on PATH.", "bad")
+            return False
+        if (PHOTON_DIR / ".git").is_dir():
+            self.run_command([git, "-C", str(PHOTON_DIR), "pull", "--ff-only"], timeout=300, env=self.env)
+        else:
+            if PHOTON_DIR.exists():
+                shutil.rmtree(PHOTON_DIR)
+            if self.run_command([git, "clone", "--depth", "1", PHOTON_REPO, str(PHOTON_DIR)], timeout=600, env=self.env) != 0:
+                return False
+        if not (PHOTON_VENV / "bin" / "python").is_file():
+            if self.run_command([python, "-m", "venv", str(PHOTON_VENV)], timeout=300, env=self.env) != 0:
+                return False
+        venv_python = str(PHOTON_VENV / "bin" / "python")
+        requirements = PHOTON_DIR / "requirements.txt"
+        if requirements.is_file():
+            if self.run_command([venv_python, "-m", "pip", "install", "-r", str(requirements)], timeout=900, env=self.env) != 0:
+                return False
+        launcher = LOCAL_BIN / "photon"
+        launcher.write_text(
+            "#!/usr/bin/env bash\n"
+            "# Launcher created by MH Security Tool Installer\n"
+            f'exec "{venv_python}" "{PHOTON_DIR / "photon.py"}" "$@"\n',
+            encoding="utf-8",
+        )
+        launcher.chmod(0o755)
+        return True
+
     def run_command(self, command: list[str], timeout: int, env: dict[str, str] | None = None) -> int:
         command = [str(x) for x in command]
         self.post_log("$ " + " ".join(command), "info")
@@ -862,7 +930,7 @@ class InstallerApp:
             note = (lines[0][:180] if lines else f"{binary} exited with code {result.returncode}")
             # Some CLIs return a non-zero code for a help screen. Treat them as
             # available only when their own executable responds with useful output.
-            ok = result.returncode == 0 or (name in {"DNSRecon", "Arjun"} and bool(lines))
+            ok = result.returncode == 0 or (name in {"DNSRecon", "Arjun", "Photon"} and bool(lines))
             if not silent:
                 self.post_log(f"{'PASS' if ok else 'FAIL'} {name}: {note}", "good" if ok else "bad")
             return ok, note
