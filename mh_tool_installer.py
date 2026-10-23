@@ -52,6 +52,7 @@ GO_TOOLS = {
     "dnsx": ("dnsx", ["go", "install", "-v", "github.com/projectdiscovery/dnsx/cmd/dnsx@latest"], ["dnsx", "-version"], {}),
     "naabu": ("naabu", ["go", "install", "-v", "github.com/projectdiscovery/naabu/v2/cmd/naabu@latest"], ["naabu", "-version"], {}),
     "Nuclei": ("nuclei", ["go", "install", "-v", "github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest"], ["nuclei", "-version"], {"CGO_ENABLED": "0"}),
+    "Nuclei": ("nuclei", ["go", "install", "-v", "github.com/s0md3v/Photon"], ["nuclei", "-version"], {"CGO_ENABLED": "0"}),
 }
 CHECKS = {
     "DNSRecon": ("dnsrecon", ["dnsrecon", "--help"]),
